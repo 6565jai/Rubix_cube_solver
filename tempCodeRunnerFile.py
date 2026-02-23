@@ -1,18 +1,14 @@
 import cv2
-import tkinter as tk
-
-root = tk.Tk()
-screen_w = root.winfo_screenwidth()
-screen_h = root.winfo_screenheight()
-root.destroy()
 cam=cv2.VideoCapture(0)
 grid_size=300
 while True:
     ret,frame=cam.read()
+    screen_w = 1920   # change to your screen
+    screen_h = 1080
     frame = cv2.resize(frame, (screen_w, screen_h))
     if(ret==False):
        print("Could not found image")
-    frame_height,frame_width=frame.shape[:2]
+    frame_width,frame_height=frame.shape[:2]
     center_grid=(frame_width//2,frame_height//2)
     start_x=(frame_width//2)-(grid_size // 2)
     start_y=(frame_height//2)-(grid_size // 2)
@@ -29,6 +25,3 @@ while True:
         break
 cv2.release
 cv2.destroyAllWindows()
-
-
-
