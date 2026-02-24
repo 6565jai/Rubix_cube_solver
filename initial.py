@@ -1,38 +1,49 @@
 import cv2
 import tkinter as tk
 
-root = tk.Tk()
-screen_w = 864
-
-screen_h = root.winfo_screenheight()
-print(screen_h)
-root.destroy()
-cam=cv2.VideoCapture(0)
 grid_size=270
+
+
+def get_screen_height():
+    root = tk.Tk()
+    height = root.winfo_screenheight()
+    root.destroy()
+    return height
+
+def draw_grid(frame, grid_size):
+    h, w = frame.shape[:2]
+    start_x = (w // 2) - (grid_size // 2)
+    start_y = (h // 2) - (grid_size // 2)
+    end_x = start_x + grid_size
+    end_y = start_y + grid_size
+
+    cv2.rectangle(frame, (start_x, start_y), (end_x, end_y), (255, 255, 255), 2)
+
+    cell = grid_size // 3
+    for i in range(1, 3):
+        cv2.line(frame,
+                 (start_x + i * cell, start_y),
+                 (start_x + i * cell, end_y),
+                 (255, 255, 255), 2)
+        cv2.line(frame,
+                 (start_x, start_y + i * cell),
+                 (end_x, start_y + i * cell),
+                 (255, 255, 255), 2)
+    return frame
+
+screen_height = get_screen_height()
+cam = cv2.VideoCapture(0)
 while True:
-    ret,frame=cam.read()
-    
-    frame = cv2.resize(frame, (screen_w, screen_h))
-    frame=cv2.flip(frame,1)
-    if(ret==False):
-       print("Could not found image")
-    frame_height,frame_width=frame.shape[:2]
-    center_grid=(frame_width//2,frame_height//2)
-    start_x=(frame_width//2)-(grid_size // 2)
-    start_y=(frame_height//2)-(grid_size // 2)
-    end_x=(frame_width//2)+(grid_size // 2)
-    end_y=(frame_height//2)+(grid_size // 2)
-
-    grid=cv2.rectangle(frame,(start_x,start_y),(end_x,end_y),(255, 255, 255),thickness=2)
-    
-    for i in range(1,3):
-        cv2.line(frame,(start_x+i*(grid_size//3),start_y),(start_x+i*(grid_size//3),start_y+grid_size),(255, 255, 255),thickness=2)
-        cv2.line(frame,(start_x,start_y+i*(grid_size//3)),(start_x+grid_size,start_y+i*(grid_size//3)),(255, 255, 255),thickness=2)
-    cv2.imshow("Grid",grid)
-    if cv2.waitKey(1)& 0XFF==ord('q'):
+    ret, frame = cam.read()
+    if not ret:
+        print("Could not find image")
         break
-cv2.release
+    frame = cv2.resize(frame, (screen_height, screen_height))
+    frame = cv2.flip(frame, 1)
+    frame = draw_grid(frame,grid_size)
+
+    cv2.imshow("Grid", frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+cam.release()
 cv2.destroyAllWindows()
-
-
-
