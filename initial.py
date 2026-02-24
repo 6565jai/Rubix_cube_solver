@@ -2,14 +2,18 @@ import cv2
 import tkinter as tk
 
 root = tk.Tk()
-screen_w = root.winfo_screenwidth()
+screen_w = 864
+
 screen_h = root.winfo_screenheight()
+print(screen_h)
 root.destroy()
 cam=cv2.VideoCapture(0)
-grid_size=300
+grid_size=270
 while True:
     ret,frame=cam.read()
+    
     frame = cv2.resize(frame, (screen_w, screen_h))
+    frame=cv2.flip(frame,1)
     if(ret==False):
        print("Could not found image")
     frame_height,frame_width=frame.shape[:2]
