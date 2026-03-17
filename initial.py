@@ -1,111 +1,208 @@
 import cv2
 import tkinter as tk
 import numpy as np
+from collections import Counter
 
 GRID_SIZE = 270
 SCREEN_WIDTH = 864
+HISTORY_SIZE = 8   # increased for better stability
+
+# ---------- COLOR MAP ----------
+color_to_face = {
+    "white": "U",
+    "red": "R",
+    "green": "F",
+    "yellow": "D",
+    "orange": "L",
+    "blue": "B"
+}
+
+# ---------- REFERENCE COLORS (NEW) ----------
+reference_colors = {
+    "red":    np.array([0, 200, 150]),
+    "orange": np.array([18, 220, 220]),
+    "yellow": np.array([30, 220, 220]),
+    "green":  np.array([60, 200, 150]),
+    "blue":   np.array([110,200,150]),
+    "white":  np.array([0, 0, 255])
+}
+
+def face_to_string(face):
+    return "".join([color_to_face.get(c, "X") for row in face for c in row])
 
 def get_screen_height():
     root = tk.Tk()
-    height = root.winfo_screenheight()
+    h = root.winfo_screenheight()
     root.destroy()
-    return height
+    return h
 
 def draw_grid(frame, grid_size):
     h, w = frame.shape[:2]
 
-    start_x = (w // 2) - (grid_size // 2)
-    start_y = (h // 2) - (grid_size // 2)
-    end_x = start_x + grid_size
-    end_y = start_y + grid_size
+    sx = (w // 2) - (grid_size // 2)
+    sy = (h // 2) - (grid_size // 2)
+    ex = sx + grid_size
+    ey = sy + grid_size
 
-    # Outer rectangle
-    cv2.rectangle(frame, (start_x, start_y), (end_x, end_y), (255, 255, 255), 2)
+    cv2.rectangle(frame, (sx, sy), (ex, ey), (0, 0, 0), 2)
 
     cell = grid_size // 3
     for i in range(1, 3):
-        cv2.line(frame, (start_x + i * cell, start_y),
-                 (start_x + i * cell, end_y), (255, 255, 255), 2)
+        cv2.line(frame, (sx+i*cell, sy), (sx+i*cell, ey), (0,0,0), 2)
+        cv2.line(frame, (sx, sy+i*cell), (ex, sy+i*cell), (0,0,0), 2)
 
-        cv2.line(frame, (start_x, start_y + i * cell),
-                 (end_x, start_y + i * cell), (255, 255, 255), 2)
+    return frame, sx, sy, ex, ey
 
-    return frame, start_x, start_y, end_x, end_y
+def process_roi(frame, sx, sy, ex, ey):
+    roi = frame[sy:ey, sx:ex]
+    return cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
-def process_roi(frame, start_x, start_y, end_x, end_y):
-    roi = frame[start_y:end_y, start_x:end_x]
-    gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    # avg_color = np.mean(roi, axis=(0, 1))
-    # print("Average BGR:", avg_color)
-
-    # cv2.imshow("ROI", roi)
-    # cv2.imshow("Gray ROI", gray_roi)
-    # cv2.imshow("HSV ROI", hsv_roi)
-    return hsv_roi
+# ---------- IMPROVED CLASSIFIER ----------
 def classify_cube_color(hsv):
     h, s, v = hsv
+
+    if v < 50:
+        return "unknown"
+
     if s < 40 and v > 150:
         return "white"
-    if (0 <= h <= 10) or (170 <= h <= 180):
-        return "red"
-    if 10 < h <= 20:
-        return "orange"
-    if 20 < h <= 35:
-        return "yellow"
-    if 35 < h <= 85:
-        return "green"
-    if 85 < h <= 130:
-        return "blue"
 
-    return "unknown"
-def draw_labels(frame, start_x, start_y, cell, cells_color):
-    for row in range(3):
-        for col in range(3):
-            text = cells_color[row][col]
-            x = start_x + col * cell + 10
-            y = start_y + row * cell + 30
+    hsv_vec = np.array([h, s, v])
+
+    min_dist = float("inf")
+    best = "unknown"
+
+    for color, ref in reference_colors.items():
+        dist = np.linalg.norm(hsv_vec - ref)
+        if dist < min_dist:
+            min_dist = dist
+            best = color
+
+    return best
+
+def draw_labels(frame, sx, sy, cell, colors):
+    for r in range(3):
+        for c in range(3):
+            text = colors[r][c]
+            x = sx + c * cell + 10
+            y = sy + r * cell + 30
+
             cv2.putText(frame, text, (x, y),
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5, (255, 255, 255), 1)
-screen_height = get_screen_height()
+                        0.5, (255,255,255), 1)
 
+# ---------- STABILIZATION ----------
+def stabilize_colors(history):
+    stable = [[None]*3 for _ in range(3)]
+
+    for r in range(3):
+        for c in range(3):
+            vals = [h[r][c] for h in history]
+            stable[r][c] = Counter(vals).most_common(1)[0][0]
+
+    return stable
+
+def build_cube_string(cube_faces):
+    order = ["U","R","F","D","L","B"]
+    return "".join([face_to_string(cube_faces[f]) for f in order])
+
+# ---------- MAIN ----------
+screen_height = get_screen_height()
 cam = cv2.VideoCapture(0)
+
+cube_faces = {}
+history = []
 
 while True:
     ret, frame = cam.read()
     if not ret:
-        print("Could not find image")
         break
 
     frame = cv2.resize(frame, (SCREEN_WIDTH, screen_height))
     frame = cv2.flip(frame, 1)
 
-    frame, start_x, start_y, end_x, end_y = draw_grid(frame, GRID_SIZE)
-    cell = GRID_SIZE // 3
+    frame, sx, sy, ex, ey = draw_grid(frame, GRID_SIZE)
+    hsv_roi = process_roi(frame, sx, sy, ex, ey)
 
-    hsv_roi=process_roi(frame, start_x, start_y, end_x, end_y)
-    
     cell = GRID_SIZE // 3
-    cells_color = [[None for _ in range(3)] for _ in range(3)]
+    cells_color = [[None]*3 for _ in range(3)]
 
-    for row in range(3):
-        for col in range(3):
-            y1 = row * cell
-            y2 = (row + 1) * cell
-            x1 = col * cell
-            x2 = (col + 1) * cell
-            cell_roi = hsv_roi[y1:y2, x1:x2]
-            avg_hsv = np.mean(cell_roi, axis=(0,1))
-            cells_color[row][col] = classify_cube_color(avg_hsv)
-    
-    draw_labels(frame, start_x, start_y, cell, cells_color)
-    cv2.imshow("Frame",frame)
-    cv2.imshow("Hsv",hsv_roi)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    for r in range(3):
+        for c in range(3):
+            y1, y2 = r*cell, (r+1)*cell
+            x1, x2 = c*cell, (c+1)*cell
+
+            # 🔥 CENTER CROP (IMPORTANT)
+            margin = 10
+            cell_roi = hsv_roi[y1+margin:y2-margin, x1+margin:x2-margin]
+
+            avg = np.mean(cell_roi, axis=(0,1))
+
+            # 🔥 BRIGHTNESS NORMALIZATION
+            h, s, v = avg
+            v = min(v * 1.2, 255)
+
+            color = classify_cube_color(np.array([h, s, v]))
+
+            # 🔥 NOISE FILTER
+            if s < 60 and v < 120:
+                color = "unknown"
+
+            cells_color[r][c] = color
+
+    # ---------- STABILITY ----------
+    history.append(cells_color)
+    if len(history) > HISTORY_SIZE:
+        history.pop(0)
+
+    stable = stabilize_colors(history)
+
+    draw_labels(frame, sx, sy, cell, stable)
+
+    cv2.imshow("Frame", frame)
+
+    key = cv2.waitKey(1) & 0xFF
+
+    if key == ord('q'):
         break
-for row in cells_color:
-        print(row)
+
+    # ---------- CAPTURE ----------
+    if key == ord('c'):
+        flat = [c for row in stable for c in row]
+
+        if "unknown" in flat:
+            print("❌ Not stable yet")
+            continue
+
+        center = stable[1][1]
+
+        face_map = {
+            "white": "U",
+            "red": "R",
+            "green": "F",
+            "yellow": "D",
+            "orange": "L",
+            "blue": "B"
+        }
+
+        face_id = face_map[center]
+        cube_faces[face_id] = stable
+
+        print("✅ Stored:", face_id)
+        print("Total:", len(cube_faces))
+
+        # ---------- BUILD STRING ----------
+        if len(cube_faces) == 6:
+            cube_string = build_cube_string(cube_faces)
+
+            print("\n🎯 Cube String:")
+            print(cube_string)
+
+            import kociemba
+            solution = kociemba.solve(cube_string)
+
+            print("\n🧠 Solution:", solution)
+            break
+
 cam.release()
 cv2.destroyAllWindows()
-
