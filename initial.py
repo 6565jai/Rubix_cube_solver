@@ -1,23 +1,18 @@
-import cv2
 import tkinter as tk
+from PIL import Image, ImageTk
+import cv2
 import numpy as np
 from collections import Counter
+import kociemba
 
 GRID_SIZE = 270
-SCREEN_WIDTH = 864
-HISTORY_SIZE = 8   # increased for better stability
 
-# ---------- COLOR MAP ----------
+# ---------- COLOR ----------
 color_to_face = {
-    "white": "U",
-    "red": "R",
-    "green": "F",
-    "yellow": "D",
-    "orange": "L",
-    "blue": "B"
+    "white": "U","red": "R","green": "F",
+    "yellow": "D","orange": "L","blue": "B"
 }
 
-# ---------- REFERENCE COLORS (NEW) ----------
 reference_colors = {
     "red":    np.array([0, 200, 150]),
     "orange": np.array([18, 220, 220]),
@@ -27,182 +22,192 @@ reference_colors = {
     "white":  np.array([0, 0, 255])
 }
 
-def face_to_string(face):
-    return "".join([color_to_face.get(c, "X") for row in face for c in row])
+def classify(hsv):
+    h,s,v = hsv
+    if v < 50: return "unknown"
+    if s < 40 and v > 150: return "white"
 
-def get_screen_height():
-    root = tk.Tk()
-    h = root.winfo_screenheight()
-    root.destroy()
-    return h
+    hsv_vec = np.array([h,s,v])
+    best, min_d = "unknown", 1e9
 
-def draw_grid(frame, grid_size):
-    h, w = frame.shape[:2]
-
-    sx = (w // 2) - (grid_size // 2)
-    sy = (h // 2) - (grid_size // 2)
-    ex = sx + grid_size
-    ey = sy + grid_size
-
-    cv2.rectangle(frame, (sx, sy), (ex, ey), (0, 0, 0), 2)
-
-    cell = grid_size // 3
-    for i in range(1, 3):
-        cv2.line(frame, (sx+i*cell, sy), (sx+i*cell, ey), (0,0,0), 2)
-        cv2.line(frame, (sx, sy+i*cell), (ex, sy+i*cell), (0,0,0), 2)
-
-    return frame, sx, sy, ex, ey
-
-def process_roi(frame, sx, sy, ex, ey):
-    roi = frame[sy:ey, sx:ex]
-    return cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-
-# ---------- IMPROVED CLASSIFIER ----------
-def classify_cube_color(hsv):
-    h, s, v = hsv
-
-    if v < 50:
-        return "unknown"
-
-    if s < 40 and v > 150:
-        return "white"
-
-    hsv_vec = np.array([h, s, v])
-
-    min_dist = float("inf")
-    best = "unknown"
-
-    for color, ref in reference_colors.items():
-        dist = np.linalg.norm(hsv_vec - ref)
-        if dist < min_dist:
-            min_dist = dist
-            best = color
-
+    for c, ref in reference_colors.items():
+        d = np.linalg.norm(hsv_vec - ref)
+        if d < min_d:
+            min_d = d
+            best = c
     return best
 
-def draw_labels(frame, sx, sy, cell, colors):
-    for r in range(3):
-        for c in range(3):
-            text = colors[r][c]
-            x = sx + c * cell + 10
-            y = sy + r * cell + 30
-
-            cv2.putText(frame, text, (x, y),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5, (255,255,255), 1)
-
-# ---------- STABILIZATION ----------
-def stabilize_colors(history):
-    stable = [[None]*3 for _ in range(3)]
-
+def stabilize(history):
+    out = [[None]*3 for _ in range(3)]
     for r in range(3):
         for c in range(3):
             vals = [h[r][c] for h in history]
-            stable[r][c] = Counter(vals).most_common(1)[0][0]
+            out[r][c] = Counter(vals).most_common(1)[0][0]
+    return out
 
-    return stable
+# ---------- APP ----------
+class CubeApp:
+    def __init__(self, root):
+        self.root = root
+        self.cap = cv2.VideoCapture(0)
 
-def build_cube_string(cube_faces):
-    order = ["U","R","F","D","L","B"]
-    return "".join([face_to_string(cube_faces[f]) for f in order])
+        self.label = tk.Label(root)
+        self.label.pack()
 
-# ---------- MAIN ----------
-screen_height = get_screen_height()
-cam = cv2.VideoCapture(0)
+        self.info = tk.Label(root, text="Show WHITE face", font=("Arial",14))
+        self.info.pack()
 
-cube_faces = {}
-history = []
+        tk.Button(root, text="Capture", command=self.capture).pack()
+        tk.Button(root, text="Solve", command=self.solve).pack()
+        tk.Button(root, text="Next Move", command=self.next_move).pack()
 
-while True:
-    ret, frame = cam.read()
-    if not ret:
-        break
+        self.move_label = tk.Label(root, text="", font=("Arial",16))
+        self.move_label.pack()
 
-    frame = cv2.resize(frame, (SCREEN_WIDTH, screen_height))
-    frame = cv2.flip(frame, 1)
+        self.history = []
+        self.cube_faces = {}
+        self.moves = []
+        self.move_index = 0
+        self.current_frame = None
+        self.current_grid = None
 
-    frame, sx, sy, ex, ey = draw_grid(frame, GRID_SIZE)
-    hsv_roi = process_roi(frame, sx, sy, ex, ey)
+        self.update()
 
-    cell = GRID_SIZE // 3
-    cells_color = [[None]*3 for _ in range(3)]
+    # ---------- DRAW GRID ----------
+    def draw_grid(self, frame):
+        h,w = frame.shape[:2]
+        sx, sy = w//2-135, h//2-135
+        ex, ey = sx+270, sy+270
 
-    for r in range(3):
-        for c in range(3):
-            y1, y2 = r*cell, (r+1)*cell
-            x1, x2 = c*cell, (c+1)*cell
+        cv2.rectangle(frame,(sx,sy),(ex,ey),(0,0,0),2)
+        cell = 90
 
-            # 🔥 CENTER CROP (IMPORTANT)
-            margin = 10
-            cell_roi = hsv_roi[y1+margin:y2-margin, x1+margin:x2-margin]
+        for i in range(1,3):
+            cv2.line(frame,(sx+i*cell,sy),(sx+i*cell,ey),(0,0,0),2)
+            cv2.line(frame,(sx,sy+i*cell),(ex,sy+i*cell),(0,0,0),2)
 
-            avg = np.mean(cell_roi, axis=(0,1))
+        return sx,sy,ex,ey,cell
 
-            # 🔥 BRIGHTNESS NORMALIZATION
-            h, s, v = avg
-            v = min(v * 1.2, 255)
+    # ---------- ARROWS ----------
+    def draw_arrow(self, frame, move):
+        h,w = frame.shape[:2]
+        cx,cy = w//2,h//2
+        L=80
 
-            color = classify_cube_color(np.array([h, s, v]))
+        if move=="R":
+            cv2.arrowedLine(frame,(cx+140,cy),(cx+140,cy-L),(0,0,255),4)
+        elif move=="R'":
+            cv2.arrowedLine(frame,(cx+140,cy-L),(cx+140,cy),(0,0,255),4)
+        elif move=="U":
+            cv2.arrowedLine(frame,(cx,cy-140),(cx+L,cy-140),(0,0,255),4)
+        elif move=="U'":
+            cv2.arrowedLine(frame,(cx+L,cy-140),(cx,cy-140),(0,0,255),4)
+        elif move=="L":
+            cv2.arrowedLine(frame,(cx-140,cy),(cx-140,cy+L),(0,0,255),4)
+        elif move=="L'":
+            cv2.arrowedLine(frame,(cx-140,cy+L),(cx-140,cy),(0,0,255),4)
 
-            # 🔥 NOISE FILTER
-            if s < 60 and v < 120:
-                color = "unknown"
+    # ---------- CAMERA LOOP ----------
+    def update(self):
+        ret, frame = self.cap.read()
+        if not ret: return
 
-            cells_color[r][c] = color
+        frame = cv2.flip(frame,1)
 
-    # ---------- STABILITY ----------
-    history.append(cells_color)
-    if len(history) > HISTORY_SIZE:
-        history.pop(0)
+        sx,sy,ex,ey,cell = self.draw_grid(frame)
 
-    stable = stabilize_colors(history)
+        roi = frame[sy:ey, sx:ex]
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
-    draw_labels(frame, sx, sy, cell, stable)
+        grid = [[None]*3 for _ in range(3)]
 
-    cv2.imshow("Frame", frame)
+        for r in range(3):
+            for c in range(3):
+                y1,y2 = r*cell,(r+1)*cell
+                x1,x2 = c*cell,(c+1)*cell
 
-    key = cv2.waitKey(1) & 0xFF
+                crop = hsv[y1+10:y2-10, x1+10:x2-10]
+                avg = np.mean(crop,(0,1))
 
-    if key == ord('q'):
-        break
+                h,s,v = avg
+                v = min(v*1.2,255)
+
+                col = classify([h,s,v])
+
+                if s<60 and v<120:
+                    col="unknown"
+
+                grid[r][c]=col
+
+        self.history.append(grid)
+        if len(self.history)>8:
+            self.history.pop(0)
+
+        stable = stabilize(self.history)
+        self.current_grid = stable
+
+        # draw labels
+        for r in range(3):
+            for c in range(3):
+                cv2.putText(frame, stable[r][c],
+                    (sx+c*cell+10, sy+r*cell+30),
+                    cv2.FONT_HERSHEY_SIMPLEX,0.5,(255,255,255),1)
+
+        # show arrow
+        if self.move_index < len(self.moves):
+            move = self.moves[self.move_index]
+            self.draw_arrow(frame, move)
+            self.move_label.config(text="Move: "+move)
+        elif self.moves:
+            self.move_label.config(text="SOLVED 🎉")
+
+        # show in tkinter
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img = ImageTk.PhotoImage(Image.fromarray(rgb))
+        self.label.imgtk = img
+        self.label.configure(image=img)
+
+        self.root.after(10, self.update)
 
     # ---------- CAPTURE ----------
-    if key == ord('c'):
-        flat = [c for row in stable for c in row]
+    def capture(self):
+        grid = self.current_grid
+        flat = [c for row in grid for c in row]
 
         if "unknown" in flat:
-            print("❌ Not stable yet")
-            continue
+            self.info.config(text="Not stable")
+            return
 
-        center = stable[1][1]
+        face_id = color_to_face[grid[1][1]]
+        self.cube_faces[face_id] = grid
 
-        face_map = {
-            "white": "U",
-            "red": "R",
-            "green": "F",
-            "yellow": "D",
-            "orange": "L",
-            "blue": "B"
-        }
+        self.info.config(text=f"{face_id} captured ({len(self.cube_faces)}/6)")
 
-        face_id = face_map[center]
-        cube_faces[face_id] = stable
+    # ---------- SOLVE ----------
+    def solve(self):
+        if len(self.cube_faces) < 6:
+            self.info.config(text="Capture all faces")
+            return
 
-        print("✅ Stored:", face_id)
-        print("Total:", len(cube_faces))
+        order = ["U","R","F","D","L","B"]
+        cube_string = ""
 
-        # ---------- BUILD STRING ----------
-        if len(cube_faces) == 6:
-            cube_string = build_cube_string(cube_faces)
+        for f in order:
+            for row in self.cube_faces[f]:
+                for col in row:
+                    cube_string += color_to_face[col]
 
-            print("\n🎯 Cube String:")
-            print(cube_string)
+        sol = kociemba.solve(cube_string)
+        self.moves = sol.split()
+        self.move_index = 0
 
-            import kociemba
-            solution = kociemba.solve(cube_string)
+    def next_move(self):
+        self.move_index += 1
 
-            print("\n🧠 Solution:", solution)
-            break
+# ---------- RUN ----------
+root = tk.Tk()
+root.title("Cube Solver GUI")
 
-cam.release()
-cv2.destroyAllWindows()
+app = CubeApp(root)
+
+root.mainloop()
